@@ -1,0 +1,127 @@
+if __name__ == "__main__":
+    # Load Data
+    X, Y = load_data(IMAGES_PATH, MASKS_PATH)
+    X_train, X_temp, Y_train, Y_temp = train_test_split(X, Y, test_size=0.2, random_state=42)
+    X_val, X_test, Y_val, Y_test = train_test_split(X_temp, Y_temp, test_size=0.5, random_state=42)
+
+    # Build and Compile Model
+    model = unet_with_resnet_mobilenet((IMG_HEIGHT, IMG_WIDTH, IMG_CHANNELS))
+    model.compile(optimizer=Adam(learning_rate=LEARNING_RATE),
+                  loss=combined_loss,
+                  metrics=[dice_coef, "accuracy"])
+
+    # Callbacks
+    early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, verbose=1)
+
+    # Train Model
+    history = model.fit(
+        X_train, Y_train,
+        validation_data=(X_val, Y_val),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        callbacks=[early_stopping, reduce_lr]
+    )
+
+    # Evaluate Metrics
+    y_val_pred = model.predict(X_val)
+    y_val_thresholded = (y_val_pred > 0.5).astype(np.uint8)
+
+    y_test_pred = model.predict(X_test)
+    y_test_thresholded = (y_test_pred > 0.5).astype(np.uint8)
+
+    metrics = Metrics()
+    dice_val = np.mean([metrics.dice_coefficient(Y_val[i], y_val_thresholded[i]) for i in range(len(Y_val))])
+    iou_val = np.mean([metrics.iou_coefficient(Y_val[i], y_val_thresholded[i]) for i in range(len(Y_val))])
+
+    dice_test = np.mean([metrics.dice_coefficient(Y_test[i], y_test_thresholded[i]) for i in range(len(Y_test))])
+    iou_test = np.mean([metrics.iou_coefficient(Y_test[i], y_test_thresholded[i]) for i in range(len(Y_test))])
+
+    print(f"Validation Dice Coefficient: {dice_val}")
+    print(f"Validation IoU Coefficient: {iou_val}")
+    print(f"Test Dice Coefficient: {dice_test}")
+    print(f"Test IoU Coefficient: {iou_test}")
+
+    # Validation Metrics
+    val_precision = precision_score(Y_val.flatten(), y_val_thresholded.flatten())
+    val_recall = recall_score(Y_val.flatten(), y_val_thresholded.flatten())
+
+    # Test Metrics
+    test_precision = precision_score(Y_test.flatten(), y_test_thresholded.flatten())
+    test_recall = recall_score(Y_test.flatten(), y_test_thresholded.flatten())
+
+    # Print Precision and Recall
+    print(f"Validation Precision: {val_precision}")
+    print(f"Validation Recall: {val_recall}")
+    print(f"Test Precision: {test_precision}")
+    print(f"Test Recall: {test_recall}")
+
+
+    # Visualization for Validation Samples
+    def visualize_predictions(X, Y_true, Y_pred, num_samples):
+        for i in range(num_samples):
+            plt.figure(figsize=(12, 4))
+
+            plt.subplot(1, 3, 1)
+            plt.title("Input Image")
+            plt.imshow(X[i])
+
+            plt.subplot(1, 3, 2)
+            plt.title("Ground Truth")
+            plt.imshow(Y_true[i].squeeze(), cmap='gray')
+
+            plt.subplot(1, 3, 3)
+            plt.title("Prediction")
+            plt.imshow(Y_pred[i].squeeze(), cmap='gray')
+
+            plt.show()
+
+    visualize_predictions(X_val, Y_val, y_val_thresholded, num_samples=50)
+    visualize_predictions(X_test, Y_test, y_test_thresholded, num_samples=20)
+
+    # Grad-CAM++ Visualization
+    def grad_cam_plus_plus(model, img, layer_name="conv5_block3_out"):
+        grad_model = tf.keras.models.Model([model.input], [model.get_layer(layer_name).output, model.output])
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(np.expand_dims(img, axis=0))
+            loss = predictions[:, 0]
+        grads = tape.gradient(loss, conv_outputs)
+        guided_grads = (tf.cast(conv_outputs > 0, tf.float32)) * grads
+        weights = tf.reduce_mean(guided_grads, axis=(0, 1))
+        cam = tf.reduce_sum(tf.multiply(weights, conv_outputs), axis=-1)
+        cam = np.maximum(cam, 0)
+        cam = cv2.resize(cam[0], (img.shape[1], img.shape[0]))
+        heatmap = (cam - cam.min()) / (cam.max() - cam.min())
+        return heatmap
+
+    # Visualizing Predictions and Grad-CAM++
+    for i in range(50):
+        heatmap = grad_cam_plus_plus(model, X_val[i])
+        plt.figure(figsize=(20, 10))
+        plt.subplot(1, 3, 1)
+        plt.title("Input Image")
+        plt.imshow(X_val[i])
+        plt.subplot(1, 3, 2)
+        plt.title("Grad-CAM++ Heatmap")
+        plt.imshow(X_val[i])
+        plt.imshow(heatmap, cmap="jet", alpha=0.5)
+        plt.subplot(1, 3, 3)
+        plt.title("Ground Truth Mask")
+        plt.imshow(Y_val[i].squeeze(), cmap="gray")
+        plt.show()
+
+    # Plot Training and Validation Metrics
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.legend()
+    plt.title('Loss')
+
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['accuracy'], label='Training Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.legend()
+    plt.title('Accuracy')
+
+    plt.show()
