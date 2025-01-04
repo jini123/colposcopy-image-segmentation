@@ -1,0 +1,135 @@
+#Model
+# Loss Functions
+def dice_coef(y_true, y_pred):
+    y_true_f = tf.keras.backend.flatten(tf.cast(y_true, tf.float32))
+    y_pred_f = tf.keras.backend.flatten(tf.cast(y_pred, tf.float32))
+    intersection = tf.keras.backend.sum(y_true_f * y_pred_f)
+    return (2. * intersection + 1e-7) / (tf.keras.backend.sum(y_true_f) + tf.keras.backend.sum(y_pred_f) + 1e-7)
+
+def dice_loss(y_true, y_pred):
+    return 1 - dice_coef(y_true, y_pred)
+
+def tversky_loss(y_true, y_pred, alpha=0.7, beta=0.3):
+    y_true_f = tf.keras.backend.flatten(tf.cast(y_true, tf.float32))
+    y_pred_f = tf.keras.backend.flatten(tf.cast(y_pred, tf.float32))
+    intersection = tf.keras.backend.sum(y_true_f * y_pred_f)
+    false_neg = tf.keras.backend.sum(y_true_f * (1 - y_pred_f))
+    false_pos = tf.keras.backend.sum((1 - y_true_f) * y_pred_f)
+    return 1 - (intersection + 1) / (intersection + alpha * false_neg + beta * false_pos + 1)
+
+def combined_loss(y_true, y_pred):
+    bce = tf.keras.losses.BinaryCrossentropy()(y_true, y_pred)
+    dice = dice_loss(y_true, y_pred)
+    tversky = tversky_loss(y_true, y_pred)
+    return bce + dice + tversky
+
+# Metrics Class
+class Metrics:
+    def dice_coefficient(self, y_true, y_pred):
+        y_true = y_true.flatten()
+        y_pred = y_pred.flatten()
+        intersection = np.sum(y_true * y_pred)
+        return (2. * intersection) / (np.sum(y_true) + np.sum(y_pred) + 1e-7)
+
+    def iou_coefficient(self, y_true, y_pred):
+        y_true = y_true.flatten()
+        y_pred = y_pred.flatten()
+        intersection = np.sum(y_true * y_pred)
+        union = np.sum(y_true) + np.sum(y_pred) - intersection
+        return intersection / (union + 1e-7)
+
+# Load Dataset Function
+def load_data(image_dir, mask_dir, img_size=(256, 256)):
+    images, masks = [], []
+    image_files = sorted(os.listdir(image_dir))
+    mask_files = sorted(os.listdir(mask_dir))
+    mask_dict = {os.path.splitext(mask)[0].split("_mask")[0]: mask for mask in mask_files}
+    for img_file in image_files:
+        img_prefix = os.path.splitext(img_file)[0].split("_aug")[0]
+        img_full_path = os.path.join(image_dir, img_file)
+        if img_prefix not in mask_dict:
+            continue
+        mask_file = mask_dict[img_prefix]
+        mask_full_path = os.path.join(mask_dir, mask_file)
+        img = cv2.imread(img_full_path) / 255.0
+        img = cv2.resize(img, img_size)
+        mask = cv2.imread(mask_full_path, cv2.IMREAD_GRAYSCALE) / 255.0
+        mask = cv2.resize(mask, img_size)
+        mask = np.expand_dims(mask, axis=-1)
+        images.append(img.astype(np.float32))
+        masks.append(mask.astype(np.float32))
+    return np.array(images), np.array(masks)
+
+# Attention Module
+def attention_module(x):
+    channel = x.shape[-1]
+    se = GlobalAveragePooling2D()(x)
+    se = Reshape((1, 1, channel))(se)
+    se = tf.keras.layers.Dense(channel // 8, activation='relu')(se)
+    se = tf.keras.layers.Dense(channel, activation='sigmoid')(se)
+    return Multiply()([x, se])
+
+# Lightweight ASPP
+def lightweight_aspp(inputs):
+    dims = inputs.shape
+    y1 = DepthwiseConv2D((1, 1), padding="same", activation="relu")(inputs)
+    y2 = DepthwiseConv2D((3, 3), padding="same", dilation_rate=6, activation="relu")(inputs)
+    y3 = DepthwiseConv2D((3, 3), padding="same", dilation_rate=12, activation="relu")(inputs)
+    y4 = tf.reduce_mean(inputs, axis=[1, 2], keepdims=True)
+    y4 = DepthwiseConv2D((1, 1), padding="same", activation="relu")(y4)
+    y4 = tf.image.resize(y4, (dims[1], dims[2]))
+    return tf.concat([y1, y2, y3, y4], axis=-1)
+
+# Combined U-Net with ResNet50 and MobileNetV2 Encoders
+def unet_with_resnet_mobilenet(input_shape):
+    inputs = Input(input_shape)
+
+    # ResNet50 Backbone
+    resnet_base = tf.keras.applications.ResNet50(weights='imagenet', include_top=False, input_tensor=inputs)
+    resnet_c1 = resnet_base.get_layer("conv2_block3_out").output
+    resnet_c2 = resnet_base.get_layer("conv3_block4_out").output
+    resnet_c3 = resnet_base.get_layer("conv4_block6_out").output
+    resnet_c4 = resnet_base.get_layer("conv5_block3_out").output
+
+    # MobileNetV2 Backbone
+    mobilenet_base = tf.keras.applications.MobileNetV2(weights='imagenet', include_top=False, input_tensor=inputs)
+    mobilenet_c1 = mobilenet_base.get_layer("block_1_expand_relu").output
+    mobilenet_c2 = mobilenet_base.get_layer("block_3_expand_relu").output
+    mobilenet_c3 = mobilenet_base.get_layer("block_6_expand_relu").output
+    mobilenet_c4 = mobilenet_base.get_layer("block_13_expand_relu").output
+
+    # Resize MobileNetV2 feature maps to match ResNet50 feature maps
+    mobilenet_c4 = tf.keras.layers.Resizing(resnet_c4.shape[1], resnet_c4.shape[2])(mobilenet_c4)
+    mobilenet_c3 = tf.keras.layers.Resizing(resnet_c3.shape[1], resnet_c3.shape[2])(mobilenet_c3)
+    mobilenet_c2 = tf.keras.layers.Resizing(resnet_c2.shape[1], resnet_c2.shape[2])(mobilenet_c2)
+    mobilenet_c1 = tf.keras.layers.Resizing(resnet_c1.shape[1], resnet_c1.shape[2])(mobilenet_c1)
+
+    # Combine High-Level Features from Both Backbones
+    combined_c4 = Concatenate()([resnet_c4, mobilenet_c4])
+    b = Conv2D(1024, 3, activation='relu', padding='same')(combined_c4)
+    b = Dropout(0.5)(b)
+
+    # Decoder
+    u1 = Conv2DTranspose(512, 3, strides=(2, 2), padding='same')(b)
+    u1 = Concatenate()([u1, resnet_c3, mobilenet_c3])
+    u1 = Conv2D(512, 3, activation='relu', padding='same')(u1)
+    u1 = Dropout(0.5)(u1)
+
+    u2 = Conv2DTranspose(256, 3, strides=(2, 2), padding='same')(u1)
+    u2 = Concatenate()([u2, resnet_c2, mobilenet_c2])
+    u2 = Conv2D(256, 3, activation='relu', padding='same')(u2)
+    u2 = Dropout(0.5)(u2)
+
+    u3 = Conv2DTranspose(128, 3, strides=(2, 2), padding='same')(u2)
+    u3 = Concatenate()([u3, resnet_c1, mobilenet_c1])
+    u3 = Conv2D(128, 3, activation='relu', padding='same')(u3)
+
+    u4 = Conv2DTranspose(64, 3, strides=(2, 2), padding='same')(u3)
+    u4 = Conv2D(64, 3, activation='relu', padding='same')(u4)
+
+    # Ensure output matches the input size
+    u4 = UpSampling2D(size=(2, 2), interpolation='bilinear')(u4)
+    outputs = Conv2D(1, 1, activation='sigmoid')(u4)
+
+    model = Model(inputs, outputs)
+    return model
