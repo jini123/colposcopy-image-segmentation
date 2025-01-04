@@ -1,0 +1,23 @@
+#FINAL
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+from tensorflow.keras.layers import (Input, Conv2D, DepthwiseConv2D, UpSampling2D,
+                                       Concatenate, Dropout, BatchNormalization,
+                                       GlobalAveragePooling2D, Multiply, Reshape,
+                                       Conv2DTranspose)
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.metrics import precision_score, recall_score
+import cv2
+
+# Constants
+IMG_HEIGHT, IMG_WIDTH, IMG_CHANNELS = 256, 256, 3
+IMAGES_PATH = "/content/drive/MyDrive/segmentation_data/preprocess_images"
+MASKS_PATH = "/content/drive/MyDrive/segmentation_data/preprocess_masks"
+BATCH_SIZE = 16
+EPOCHS = 300
+LEARNING_RATE = 0.0001
