@@ -1,0 +1,112 @@
+import numpy as np
+import cv2
+import tensorflow as tf
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.metrics import cohen_kappa_score, precision_score, recall_score, confusion_matrix
+from scipy.spatial.distance import directed_hausdorff
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+
+# Dummy placeholders (replace with actual)
+def load_data(images_path, masks_path):
+    return np.random.rand(100, 128, 128, 3), np.random.randint(0, 2, (100, 128, 128, 1))
+
+def unet_with_resnet_mobilenet(input_shape):
+    inputs = tf.keras.Input(shape=input_shape)
+    x = tf.keras.layers.Conv2D(1, (1, 1), activation='sigmoid')(inputs)
+    return tf.keras.Model(inputs, x)
+
+def dice_coef(y_true, y_pred):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    intersection = tf.reduce_sum(y_true * y_pred)
+    return (2. * intersection) / (tf.reduce_sum(y_true) + tf.reduce_sum(y_pred) + 1e-6)
+
+def combined_loss(y_true, y_pred):
+    return 1 - dice_coef(y_true, y_pred)
+
+IMG_HEIGHT, IMG_WIDTH, IMG_CHANNELS = 128, 128, 3
+LEARNING_RATE = 0.001
+EPOCHS = 3
+BATCH_SIZE = 8
+IMAGES_PATH = ''
+MASKS_PATH = ''
+
+class Metrics:
+    def dice_coefficient(self, y_true, y_pred):
+        intersection = np.sum(y_true * y_pred)
+        return (2. * intersection) / (np.sum(y_true) + np.sum(y_pred) + 1e-6)
+
+    def iou_coefficient(self, y_true, y_pred):
+        intersection = np.sum(y_true * y_pred)
+        union = np.sum(y_true) + np.sum(y_pred) - intersection
+        return intersection / (union + 1e-6)
+
+    def pixel_accuracy(self, y_true, y_pred):
+        return np.sum(y_true == y_pred) / y_true.size
+
+    def mean_pixel_accuracy(self, y_true, y_pred, num_classes=2):
+        cm = confusion_matrix(y_true.flatten(), y_pred.flatten(), labels=list(range(num_classes)))
+        class_acc = np.diag(cm) / (cm.sum(axis=1) + 1e-6)
+        return np.mean(class_acc)
+
+    def frequency_weighted_iou(self, y_true, y_pred, num_classes=2):
+        cm = confusion_matrix(y_true.flatten(), y_pred.flatten(), labels=list(range(num_classes)))
+        freq = cm.sum(axis=1) / (cm.sum() + 1e-6)
+        iu = np.diag(cm) / (cm.sum(axis=1) + cm.sum(axis=0) - np.diag(cm) + 1e-6)
+        return (freq * iu).sum()
+
+    def hausdorff_distance(self, y_true, y_pred):
+        y_true_pts = np.argwhere(y_true.squeeze() == 1)
+        y_pred_pts = np.argwhere(y_pred.squeeze() == 1)
+        if len(y_true_pts) == 0 or len(y_pred_pts) == 0:
+            return np.inf
+        return max(directed_hausdorff(y_true_pts, y_pred_pts)[0],
+                   directed_hausdorff(y_pred_pts, y_true_pts)[0])
+
+# Load and Split Data
+X, Y = load_data(IMAGES_PATH, MASKS_PATH)
+X_train, X_temp, Y_train, Y_temp = train_test_split(X, Y, test_size=0.2, random_state=42)
+X_val, X_test, Y_val, Y_test = train_test_split(X_temp, Y_temp, test_size=0.5, random_state=42)
+
+# Model Compilation
+model = unet_with_resnet_mobilenet((IMG_HEIGHT, IMG_WIDTH, IMG_CHANNELS))
+model.compile(optimizer=Adam(learning_rate=LEARNING_RATE),
+              loss=combined_loss,
+              metrics=[dice_coef, "accuracy"])
+
+# Callbacks
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, verbose=1)
+
+# Train
+history = model.fit(X_train, Y_train,
+                    validation_data=(X_val, Y_val),
+                    epochs=EPOCHS,
+                    batch_size=BATCH_SIZE,
+                    callbacks=[early_stopping, reduce_lr])
+
+# Predictions
+y_val_pred = model.predict(X_val) > 0.5
+y_test_pred = model.predict(X_test) > 0.5
+
+metrics = Metrics()
+
+# Validation Metrics
+print("\n--- Validation Metrics ---")
+print("Dice:", np.mean([metrics.dice_coefficient(Y_val[i], y_val_pred[i]) for i in range(len(Y_val))]))
+print("IoU:", np.mean([metrics.iou_coefficient(Y_val[i], y_val_pred[i]) for i in range(len(Y_val))]))
+print("Pixel Accuracy:", np.mean([metrics.pixel_accuracy(Y_val[i], y_val_pred[i]) for i in range(len(Y_val))]))
+print("Mean Pixel Accuracy:", metrics.mean_pixel_accuracy(Y_val, y_val_pred))
+print("FWIoU:", metrics.frequency_weighted_iou(Y_val, y_val_pred))
+print("Hausdorff Distance:", np.mean([metrics.hausdorff_distance(Y_val[i], y_val_pred[i]) for i in range(len(Y_val))]))
+
+# Test Metrics
+print("\n--- Test Metrics ---")
+print("Dice:", np.mean([metrics.dice_coefficient(Y_test[i], y_test_pred[i]) for i in range(len(Y_test))]))
+print("IoU:", np.mean([metrics.iou_coefficient(Y_test[i], y_test_pred[i]) for i in range(len(Y_test))]))
+print("Pixel Accuracy:", np.mean([metrics.pixel_accuracy(Y_test[i], y_test_pred[i]) for i in range(len(Y_test))]))
+print("Mean Pixel Accuracy:", metrics.mean_pixel_accuracy(Y_test, y_test_pred))
+print("FWIoU:", metrics.frequency_weighted_iou(Y_test, y_test_pred))
+print("Hausdorff Distance:", np.mean([metrics.hausdorff_distance(Y_test[i], y_test_pred[i]) for i in range(len(Y_test))]))
